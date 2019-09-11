@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+
+
+import sqlite3
+import subprocess
+import fileinput
+import os
+
+def get_shops(name,db): #get list of recommended shops--not used in current version
+    #List of coffees person drinks
+    coffees=list(map(lambda x: x[0],list(db.execute('select coffee from drinks where name="{0:s}"'.format(name)))))
+
+    #List of shops person visits
+    visited=list(map(lambda x: x[0],list(db.execute('select shop from visits where name="{0:s}"'.format(name)))))
+
+    rshops=[]#reccomended shops
+    
+    if len(coffees)==0: #Person doesn't have any entries in drinks
+        print("I don't know what "+name+" drinks, so I can't recommend any shops")
+    else:
+        for coffee in coffees:
+            #list of shops that sell coffee they drink            
+            shops=list(map(lambda x: x[0],list(db.execute('select shop from serves where coffee="{0:s}"'.format(coffee))))) 
+
+            for shop in shops:
+                #only add shops that they haven't been to and that we haven't reccomended
+                if shop not in visited and shop not in rshops: 
+                    rshops.append(shop)
+        if len(rshops)==0: #Person has visited every shop that sells coffee that they drink
+            print("I don't know of any shops that "+name+" would want to go to that they haven't already been too")
+    return rshops
+
+def print_shops(rshops): #print shops in nice format based on terminal width
+    rows,columns=os.popen('stty size','r').read().split() #get terminal height and width
+    columns=int(columns)
+    line=''
+    p=''
+
+    for shop in rshops:
+        if(len(line+', '+shop)>columns-1): #if line gets too long, add newline
+            p+=line.lstrip(', ')+','+'\n'
+            line=shop                    
+        else:                            #otherwise, add another element to line
+            line+=', '+shop 
+    p+=line.lstrip(', ') #print out list
+    print()
+    print(p.strip().strip(','))
+    print()    
+
+if __name__=='__main__':
+    subprocess.run(['rm','coffee.db']) #remove database if it exists
+    err=open('logfile','w')
+    con=sqlite3.connect('coffee.db')   #open database
+    cur=con.cursor()                   #get cursor
+    cur.execute('create table serves(shop text, coffee text, price real)')          #get serves table
+    cur.execute('create table people(name text, age int, gender char(1))')          #get people table
+    cur.execute('create table drinks(name text, coffee text,unique(name,coffee))')  #get drinks table, make sure no duplicate entries
+    cur.execute('create table visits(name text, shop text,unique(name,shop))')      #get visits table, make sure no duplicate entries
+    con.commit()
+    
+    with open('/u1/junk/cs617/serves.csv') as fd: #put data in serves table
+        for line in fd:
+            #print(line.rstrip().split(','))
+            fields=line.rstrip().split(':') #get all of the fields
+            try:
+                cur.execute('insert into serves values("{0:s}","{1:s}",{2:s});'.format(fields[0].lower(),fields[1].lower(),fields[2])) #insert shop,coffee,price
+            except:
+                print("Invalid entry for serves: "+line)
+                err.write(line.strip()+'\n')
+                #con.commit()
+
+
+    
+    #get transactions
+    with open('/u1/junk/cs617/transactions.csv') as fd: 
+        for line in fd:
+            fields=line.rstrip().split(',') #get fields
+
+            if fields[0].upper()=='P': #we want to enter a person
+                try:
+                    cur.execute('insert into people values("{0:s}",{1:s},"{2:s}")'.format(fields[1].lower(),fields[2],fields[3].lower()))
+                except:
+                    print("Invalid entry for person: "+line)
+                    err.write(line.strip()+'\n')
+
+            elif fields[0].upper()=='V': #We want to check a transaction
+                #Check if person exists
+                if len(list(cur.execute('select * from people where name = "{0:s}"'.format(fields[1].lower()))))==0:
+                    print("Error") #name not in people was found
+                    err.write(line.strip()+'\n')
+                #check if the shop that the person visited sells the coffee
+                elif len(list(cur.execute('select * from serves where coffee="{0:s}" and shop="{1:s}"'.format(fields[3].lower(),fields[2].lower()))))==0:
+                    print("Shop "+fields[2]+" does not serve "+fields[3]+".")
+                    err.write(line.strip()+'\n')
+                #Transaction is good
+                else:
+                    #Add info to visits and drinks without allowing for duplicates
+                    try:
+                        cur.execute('insert or ignore into visits values("{0:s}","{1:s}")'.format(fields[1].lower(),fields[2].lower()))
+                    except:
+                        print("Error adding entry to visits: "+line)
+                        err.write(line.strip()+'\n')
+                    try:
+                        cur.execute('insert or ignore into drinks values("{0:s}","{1:s}")'.format(fields[1].lower(),fields[3].lower()))
+                    except:
+                        print("Error adding entry to drinks: "+line)
+                        err.write(line.strip()+'\n')
+            #line did not start with a 'P' or a 'V'
+            else:
+                print("Invalid line. Cannot have " +fields[0]+" as first entry, only 'P' or 'V'")
+                err.write(line.strip()+'\n')
+                
+    con.commit() #make sure database is saved
+
+    for line in fileinput.input():
+        name=line.strip().lower() #get name of person
+        
+        #Check if person is in database
+        if(len(list(cur.execute('select * from people where name="{0:s}"'.format(name))))==0): #don't know person
+            print("I dont know "+name+" so I can't recommend any shops")
+        else: #Person is in database          
+            rshops=list(map(lambda x: x[0],cur.execute('select distinct shop from serves join drinks using(coffee) where name="{0:s}" and shop not in (select shop from visits where name="{0:s}")'.format(name))))
+            #print_shops(get_shops(name,cur)) #get list of shops and print it
+            print_shops(rshops)
+
+    err.close()
